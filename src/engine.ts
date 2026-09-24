@@ -106,7 +106,16 @@ export class MendleEngine {
       return;
     }
 
-    if (refreshed.is_paused || refreshed.mode === "paused") return;
+    if (refreshed.is_paused) return;
+
+    // /op5 RESUME intentionally only clears is_paused. The worker restores the running mode.
+    if (refreshed.mode === "paused") {
+      const restoredMode = refreshed.current_generation > 0 ? "live" : "observation_window";
+      await this.store.updateProject({ mode: restoredMode, evolution_status: "running" });
+      await this.store.log("resumed", "experiment resumed by operator");
+      refreshed.mode = restoredMode;
+    }
+
     if (!["observation_window", "live"].includes(refreshed.mode)) return;
 
     const anchor = refreshed.last_generation_at ?? refreshed.initialized_at;
@@ -480,13 +489,8 @@ export class MendleEngine {
     const phenotype = this.dominantTraitLabel(postPopulation);
     const div = diversity(postPopulation);
 
-    const { data: priorGenerations } = await this.store.db
-      .from("generations")
-      .select("dominant_lineage_id")
-      .eq("project_id", await this.store.projectIdValue())
-      .order("generation", { ascending: false })
-      .limit(1);
-    const priorDominant = priorGenerations?.[0]?.dominant_lineage_id ?? null;
+    const previousGeneration = await this.store.latestGeneration();
+    const priorDominant = previousGeneration?.dominant_lineage_id ?? null;
 
     await this.store.insertGeneration({
       generation,
@@ -541,15 +545,9 @@ export class MendleEngine {
   }
 
   private async refreshLineages(counts: Map<string, number>, target: number, generation: number): Promise<void> {
-    const projectId = await this.store.projectIdValue();
-    const { data: active, error } = await this.store.db
-      .from("lineages")
-      .select("*")
-      .eq("project_id", projectId)
-      .eq("active", true);
-    if (error) throw error;
+    const active = await this.store.activeLineages();
 
-    for (const lineage of active ?? []) {
+    for (const lineage of active) {
       const living = counts.get(lineage.id) ?? 0;
       const all = await this.store.allOrganismsForLineage(lineage.id);
       const share = living / Math.max(1, target);
