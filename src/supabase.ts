@@ -207,14 +207,30 @@ export class Store {
 
   async createLineage(payload: Record<string, unknown>): Promise<string> {
     const project_id = await this.projectIdValue();
-    const rows = await this.insert<any>("lineages", [{ project_id, ...payload }]);
-    if (!rows[0]?.id) throw new Error("Worker API did not return inserted lineage id");
-    return String(rows[0].id);
+    const inserted = await this.insert<any>("lineages", [{ project_id, ...payload }]);
+    if (inserted[0]?.id) return String(inserted[0].id);
+
+    // Some bridge implementations acknowledge inserts without echoing rows.
+    const lineageNumber = payload.lineage_number;
+    const found = await this.select<any>("lineages", [
+      { column: "project_id", op: "eq", value: project_id },
+      { column: "lineage_number", op: "eq", value: lineageNumber },
+    ], 1);
+    if (!found[0]?.id) throw new Error("Could not resolve newly inserted lineage id");
+    return String(found[0].id);
   }
 
   async insertOrganisms(rows: Record<string, unknown>[]): Promise<Organism[]> {
     const project_id = await this.projectIdValue();
-    return this.insert<Organism>("organisms", rows.map((r) => ({ project_id, ...r })));
+    const inserted = await this.insert<Organism>("organisms", rows.map((r) => ({ project_id, ...r })));
+    if (inserted.length === rows.length && inserted.every((r) => r.id)) return inserted;
+
+    const numbers = rows.map((r) => Number(r.organism_number)).filter(Number.isFinite);
+    if (!numbers.length) return inserted;
+    return this.select<Organism>("organisms", [
+      { column: "project_id", op: "eq", value: project_id },
+      { column: "organism_number", op: "in", value: numbers },
+    ], Math.max(numbers.length, 1));
   }
 
   async updateOrganism(id: string, patch: Record<string, unknown>): Promise<void> {
