@@ -1,32 +1,101 @@
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { env } from "./config.js";
 import type { Habitat, MarketScores, Organism, ProjectConfig, Snapshot } from "./types.js";
 import { iso } from "./utils.js";
 
+type Filter = { column: string; op: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "is"; value: unknown };
+
+type WorkerRequest = {
+  action: "select" | "insert" | "upsert" | "update" | "delete";
+  table: string;
+  filters?: Filter[];
+  rows?: unknown;
+  values?: Record<string, unknown>;
+  onConflict?: string;
+  limit?: number;
+  order?: { column: string; ascending?: boolean };
+};
+
+function unwrap<T>(payload: any): T {
+  if (payload == null) return payload as T;
+  if (payload.data !== undefined) return payload.data as T;
+  if (payload.rows !== undefined) return payload.rows as T;
+  if (payload.result !== undefined) return payload.result as T;
+  return payload as T;
+}
+
 export class Store {
-  readonly db: SupabaseClient;
   private projectId: string | null = env.projectId;
 
-  constructor() {
-    this.db = createClient(env.supabaseUrl, env.supabaseServiceRoleKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
+  private async call<T>(body: WorkerRequest): Promise<T> {
+    const response = await fetch(env.mendleApiUrl, {
+      method: "POST",
+      headers: {
+        "authorization": `Bearer ${env.workerSecret}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
     });
+
+    const text = await response.text();
+    let payload: any = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = { message: text };
+    }
+
+    if (!response.ok) {
+      throw new Error(`Lovable worker API ${response.status}: ${payload?.error ?? payload?.message ?? text}`);
+    }
+    return unwrap<T>(payload);
+  }
+
+  async healthcheck(): Promise<void> {
+    const response = await fetch(env.mendleApiUrl, {
+      headers: { "authorization": `Bearer ${env.workerSecret}` },
+    });
+    if (!response.ok) throw new Error(`Worker bridge healthcheck failed: ${response.status}`);
+  }
+
+  private async select<T = any>(
+    table: string,
+    filters: Filter[] = [],
+    limit?: number,
+    order?: { column: string; ascending?: boolean },
+  ): Promise<T[]> {
+    const data = await this.call<any>({ action: "select", table, filters, limit, order });
+    if (Array.isArray(data)) return data as T[];
+    if (Array.isArray(data?.data)) return data.data as T[];
+    if (Array.isArray(data?.rows)) return data.rows as T[];
+    return data ? [data as T] : [];
+  }
+
+  private async insert<T = any>(table: string, rows: unknown): Promise<T[]> {
+    const data = await this.call<any>({ action: "insert", table, rows });
+    if (Array.isArray(data)) return data as T[];
+    if (Array.isArray(data?.data)) return data.data as T[];
+    if (Array.isArray(data?.rows)) return data.rows as T[];
+    return data ? [data as T] : [];
+  }
+
+  private async update(table: string, values: Record<string, unknown>, filters: Filter[]): Promise<void> {
+    if (!filters.length) throw new Error(`Refusing unfiltered update on ${table}`);
+    await this.call({ action: "update", table, values, filters });
   }
 
   async project(): Promise<ProjectConfig> {
     if (this.projectId) {
-      const { data, error } = await this.db.from("project_config").select("*").eq("id", this.projectId).single();
-      if (error) throw error;
-      return data as ProjectConfig;
+      const rows = await this.select<ProjectConfig>("project_config", [{ column: "id", op: "eq", value: this.projectId }], 1);
+      if (!rows[0]) throw new Error("MENDLE_PROJECT_ID does not exist");
+      return rows[0];
     }
 
-    const { data, error } = await this.db.from("project_config").select("*").limit(2);
-    if (error) throw error;
-    if (!data || data.length !== 1) {
-      throw new Error(`Expected exactly one project_config row, found ${data?.length ?? 0}. Set MENDLE_PROJECT_ID.`);
+    const rows = await this.select<ProjectConfig>("project_config", [], 2);
+    if (rows.length !== 1) {
+      throw new Error(`Expected exactly one project_config row, found ${rows.length}. Set MENDLE_PROJECT_ID.`);
     }
-    this.projectId = data[0]!.id;
-    return data[0] as ProjectConfig;
+    this.projectId = rows[0]!.id;
+    return rows[0]!;
   }
 
   async projectIdValue(): Promise<string> {
@@ -36,202 +105,180 @@ export class Store {
 
   async updateProject(patch: Record<string, unknown>): Promise<void> {
     const id = await this.projectIdValue();
-    const { error } = await this.db.from("project_config").update({ ...patch, updated_at: iso() }).eq("id", id);
-    if (error) throw error;
+    await this.update("project_config", patch, [{ column: "id", op: "eq", value: id }]);
   }
 
   async log(event: string, message: string, level = "info"): Promise<void> {
     const project_id = await this.projectIdValue();
-    const { error } = await this.db.from("operator_logs").insert({ project_id, level, event, message });
-    if (error) throw error;
+    await this.insert("operator_logs", [{ project_id, level, event, message, created_at: iso() }]);
   }
 
   async setMarketState(state: Record<string, unknown>): Promise<void> {
     const project_id = await this.projectIdValue();
-    const { data, error } = await this.db.from("market_state").select("id").eq("project_id", project_id).limit(1);
-    if (error) throw error;
-    if (data?.[0]?.id) {
-      const res = await this.db.from("market_state").update({ ...state, updated_at: iso() }).eq("id", data[0].id);
-      if (res.error) throw res.error;
+    const existing = await this.select<any>("market_state", [{ column: "project_id", op: "eq", value: project_id }], 1);
+    if (existing[0]?.id) {
+      await this.update("market_state", { ...state, updated_at: iso() }, [{ column: "id", op: "eq", value: existing[0].id }]);
     } else {
-      const res = await this.db.from("market_state").insert({ project_id, ...state, updated_at: iso() });
-      if (res.error) throw res.error;
+      await this.insert("market_state", [{ project_id, ...state, updated_at: iso() }]);
     }
   }
 
   async insertSnapshot(s: Snapshot): Promise<void> {
     const project_id = await this.projectIdValue();
     const total = Math.max(1, s.buys + s.sells);
-    const estimatedBuyVolume = s.volumeWindow * (s.buys / total);
-    const estimatedSellVolume = s.volumeWindow * (s.sells / total);
-    const { error } = await this.db.from("market_snapshots").insert({
+    await this.insert("market_snapshots", [{
       project_id,
       timestamp: s.timestamp.toISOString(),
       price: s.price,
       volume_window: s.volumeWindow,
       liquidity: s.liquidity,
-      buy_volume: estimatedBuyVolume,
-      sell_volume: estimatedSellVolume,
+      buy_volume: s.volumeWindow * (s.buys / total),
+      sell_volume: s.volumeWindow * (s.sells / total),
       trade_count: s.tradeCount,
-    });
-    if (error) throw error;
+    }]);
   }
 
   async recentSnapshots(minutes: number): Promise<any[]> {
     const project_id = await this.projectIdValue();
     const since = new Date(Date.now() - minutes * 60_000).toISOString();
-    const { data, error } = await this.db
-      .from("market_snapshots")
-      .select("*")
-      .eq("project_id", project_id)
-      .gte("timestamp", since)
-      .order("timestamp", { ascending: true })
-      .limit(10000);
-    if (error) throw error;
-    return data ?? [];
+    const rows = await this.select<any>(
+      "market_snapshots",
+      [
+        { column: "project_id", op: "eq", value: project_id },
+        { column: "timestamp", op: "gte", value: since },
+      ],
+      10000,
+      { column: "timestamp", ascending: true },
+    );
+    return rows.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   }
 
   async recentScores(limit = 12): Promise<any[]> {
     const project_id = await this.projectIdValue();
-    const { data, error } = await this.db
-      .from("market_scores")
-      .select("*")
-      .eq("project_id", project_id)
-      .order("generation", { ascending: false })
-      .limit(limit);
-    if (error) throw error;
-    return data ?? [];
+    const rows = await this.select<any>(
+      "market_scores",
+      [{ column: "project_id", op: "eq", value: project_id }],
+      Math.max(limit * 3, limit),
+      { column: "generation", ascending: false },
+    );
+    return rows.sort((a, b) => Number(b.generation) - Number(a.generation)).slice(0, limit);
   }
 
   async insertScores(generation: number, scores: MarketScores, start: Date, end: Date): Promise<void> {
     const project_id = await this.projectIdValue();
-    const { error } = await this.db.from("market_scores").insert({
+    await this.insert("market_scores", [{
       project_id,
       generation,
       ...scores,
       window_started_at: start.toISOString(),
       window_ended_at: end.toISOString(),
-    });
-    if (error) throw error;
+    }]);
   }
 
   async insertHabitat(generation: number, h: Habitat): Promise<void> {
     const project_id = await this.projectIdValue();
-    const { error } = await this.db.from("habitats").insert({ project_id, generation, ...h });
-    if (error) throw error;
+    await this.insert("habitats", [{ project_id, generation, ...h }]);
   }
 
   async aliveOrganisms(): Promise<Organism[]> {
     const project_id = await this.projectIdValue();
-    const { data, error } = await this.db.from("organisms").select("*").eq("project_id", project_id).eq("alive", true);
-    if (error) throw error;
-    return (data ?? []) as Organism[];
+    return this.select<Organism>("organisms", [
+      { column: "project_id", op: "eq", value: project_id },
+      { column: "alive", op: "eq", value: true },
+    ], 1000);
   }
 
   async allOrganismsForLineage(lineageId: string): Promise<Organism[]> {
     const project_id = await this.projectIdValue();
-    const { data, error } = await this.db.from("organisms").select("*").eq("project_id", project_id).eq("lineage_id", lineageId);
-    if (error) throw error;
-    return (data ?? []) as Organism[];
+    return this.select<Organism>("organisms", [
+      { column: "project_id", op: "eq", value: project_id },
+      { column: "lineage_id", op: "eq", value: lineageId },
+    ], 10000);
   }
 
   async nextOrganismNumber(): Promise<number> {
     const project_id = await this.projectIdValue();
-    const { data, error } = await this.db
-      .from("organisms")
-      .select("organism_number")
-      .eq("project_id", project_id)
-      .order("organism_number", { ascending: false })
-      .limit(1);
-    if (error) throw error;
-    return Number(data?.[0]?.organism_number ?? 0) + 1;
+    const rows = await this.select<any>("organisms", [{ column: "project_id", op: "eq", value: project_id }], 10000);
+    return rows.reduce((max, r) => Math.max(max, Number(r.organism_number ?? 0)), 0) + 1;
   }
 
   async nextLineageNumber(): Promise<number> {
     const project_id = await this.projectIdValue();
-    const { data, error } = await this.db
-      .from("lineages")
-      .select("lineage_number")
-      .eq("project_id", project_id)
-      .order("lineage_number", { ascending: false })
-      .limit(1);
-    if (error) throw error;
-    return Number(data?.[0]?.lineage_number ?? 0) + 1;
+    const rows = await this.select<any>("lineages", [{ column: "project_id", op: "eq", value: project_id }], 10000);
+    return rows.reduce((max, r) => Math.max(max, Number(r.lineage_number ?? 0)), 0) + 1;
   }
 
   async createLineage(payload: Record<string, unknown>): Promise<string> {
     const project_id = await this.projectIdValue();
-    const { data, error } = await this.db.from("lineages").insert({ project_id, ...payload }).select("id").single();
-    if (error) throw error;
-    return data.id as string;
+    const rows = await this.insert<any>("lineages", [{ project_id, ...payload }]);
+    if (!rows[0]?.id) throw new Error("Worker API did not return inserted lineage id");
+    return String(rows[0].id);
   }
 
   async insertOrganisms(rows: Record<string, unknown>[]): Promise<Organism[]> {
     const project_id = await this.projectIdValue();
-    const { data, error } = await this.db.from("organisms").insert(rows.map((r) => ({ project_id, ...r }))).select("*");
-    if (error) throw error;
-    return (data ?? []) as Organism[];
+    return this.insert<Organism>("organisms", rows.map((r) => ({ project_id, ...r })));
   }
 
   async updateOrganism(id: string, patch: Record<string, unknown>): Promise<void> {
-    const { error } = await this.db.from("organisms").update(patch).eq("id", id);
-    if (error) throw error;
+    await this.update("organisms", patch, [{ column: "id", op: "eq", value: id }]);
   }
 
   async updateLineage(id: string, patch: Record<string, unknown>): Promise<void> {
-    const { error } = await this.db.from("lineages").update(patch).eq("id", id);
-    if (error) throw error;
+    await this.update("lineages", patch, [{ column: "id", op: "eq", value: id }]);
   }
 
   async insertGeneration(row: Record<string, unknown>): Promise<void> {
     const project_id = await this.projectIdValue();
-    const { error } = await this.db.from("generations").insert({ project_id, ...row });
-    if (error) throw error;
+    await this.insert("generations", [{ project_id, ...row }]);
+  }
+
+  async latestGeneration(): Promise<any | null> {
+    const project_id = await this.projectIdValue();
+    const rows = await this.select<any>(
+      "generations",
+      [{ column: "project_id", op: "eq", value: project_id }],
+      1000,
+      { column: "generation", ascending: false },
+    );
+    rows.sort((a, b) => Number(b.generation) - Number(a.generation));
+    return rows[0] ?? null;
   }
 
   async event(row: Record<string, unknown>): Promise<void> {
     const project_id = await this.projectIdValue();
-    const { error } = await this.db.from("events").insert({ project_id, ...row });
-    if (error) throw error;
+    await this.insert("events", [{ project_id, ...row }]);
   }
 
   async activeEpoch(): Promise<any | null> {
     const project_id = await this.projectIdValue();
-    const { data, error } = await this.db
-      .from("epochs")
-      .select("*")
-      .eq("project_id", project_id)
-      .is("completed_at", null)
-      .order("epoch", { ascending: false })
-      .limit(1);
-    if (error) throw error;
-    return data?.[0] ?? null;
+    const rows = await this.select<any>("epochs", [
+      { column: "project_id", op: "eq", value: project_id },
+      { column: "completed_at", op: "is", value: null },
+    ], 100);
+    rows.sort((a, b) => Number(b.epoch) - Number(a.epoch));
+    return rows[0] ?? null;
   }
 
   async createEpoch(row: Record<string, unknown>): Promise<void> {
     const project_id = await this.projectIdValue();
-    const { error } = await this.db.from("epochs").insert({ project_id, ...row });
-    if (error) throw error;
+    await this.insert("epochs", [{ project_id, ...row }]);
   }
 
   async updateEpoch(id: string, patch: Record<string, unknown>): Promise<void> {
-    const { error } = await this.db.from("epochs").update(patch).eq("id", id);
-    if (error) throw error;
+    await this.update("epochs", patch, [{ column: "id", op: "eq", value: id }]);
   }
 
-  async livingLineageCounts(): Promise<Map<string, number>> {
-    const alive = await this.aliveOrganisms();
-    const counts = new Map<string, number>();
-    for (const o of alive) {
-      if (!o.lineage_id) continue;
-      counts.set(o.lineage_id, (counts.get(o.lineage_id) ?? 0) + 1);
-    }
-    return counts;
+  async activeLineages(): Promise<any[]> {
+    const project_id = await this.projectIdValue();
+    return this.select<any>("lineages", [
+      { column: "project_id", op: "eq", value: project_id },
+      { column: "active", op: "eq", value: true },
+    ], 10000);
   }
 
   async lineage(id: string): Promise<any | null> {
-    const { data, error } = await this.db.from("lineages").select("*").eq("id", id).maybeSingle();
-    if (error) throw error;
-    return data ?? null;
+    const rows = await this.select<any>("lineages", [{ column: "id", op: "eq", value: id }], 1);
+    return rows[0] ?? null;
   }
 }
