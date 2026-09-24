@@ -34,6 +34,7 @@ export class MendleEngine {
   private lastSnapshotAt = 0;
 
   async start(): Promise<void> {
+    await this.store.healthcheck();
     await this.store.project();
     await this.store.log("worker_started", "mendle-engine connected");
     log.info("mendle-engine started");
