@@ -1,6 +1,6 @@
 {
   "name": "mendle-engine",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.57.4",
     "@types/node": "^24.5.2",
     "dotenv": "^17.2.2",
     "pino": "^9.9.4",
