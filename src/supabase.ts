@@ -45,7 +45,11 @@ export class Store {
     }
 
     if (!response.ok) {
-      throw new Error(`Lovable worker API ${response.status}: ${payload?.error ?? payload?.message ?? text}`);
+      const detail = payload?.error ?? payload?.message ?? payload ?? text;
+      const rendered = typeof detail === "string" ? detail : JSON.stringify(detail);
+      throw new Error(
+        `Lovable worker API ${response.status} on ${body.action} ${body.table}: ${rendered}`
+      );
     }
     return unwrap<T>(payload);
   }
