@@ -20,7 +20,7 @@ export const env = {
   supabaseServiceRoleKey: required("SUPABASE_SERVICE_ROLE_KEY"),
   projectId: process.env.MENDLE_PROJECT_ID?.trim() || null,
   solanaRpcUrl: required("SOLANA_RPC_URL"),
-  marketPollIntervalMs: num("MARKET_POLL_INTERVAL_MS", 2000),
+  marketPollIntervalMs: num("MARKET_POLL_INTERVAL_MS", 2000),\n  marketSnapshotIntervalSeconds: num("MARKET_SNAPSHOT_INTERVAL_SECONDS", 10),
   generationIntervalSeconds: num("GENERATION_INTERVAL_SECONDS", 300),
   initialObservationSeconds: num("INITIAL_OBSERVATION_SECONDS", 300),
   populationTarget: num("POPULATION_TARGET", 128),
