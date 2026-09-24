@@ -61,9 +61,8 @@ export class Store {
     table: string,
     filters: Filter[] = [],
     limit?: number,
-    order?: { column: string; ascending?: boolean },
   ): Promise<T[]> {
-    const data = await this.call<any>({ action: "select", table, filters, limit, order });
+    const data = await this.call<any>({ action: "select", table, filters, limit });
     if (Array.isArray(data)) return data as T[];
     if (Array.isArray(data?.data)) return data.data as T[];
     if (Array.isArray(data?.rows)) return data.rows as T[];
@@ -148,7 +147,6 @@ export class Store {
         { column: "timestamp", op: "gte", value: since },
       ],
       10000,
-      { column: "timestamp", ascending: true },
     );
     return rows.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   }
@@ -158,8 +156,7 @@ export class Store {
     const rows = await this.select<any>(
       "market_scores",
       [{ column: "project_id", op: "eq", value: project_id }],
-      Math.max(limit * 3, limit),
-      { column: "generation", ascending: false },
+      10000,
     );
     return rows.sort((a, b) => Number(b.generation) - Number(a.generation)).slice(0, limit);
   }
@@ -238,8 +235,7 @@ export class Store {
     const rows = await this.select<any>(
       "generations",
       [{ column: "project_id", op: "eq", value: project_id }],
-      1000,
-      { column: "generation", ascending: false },
+      10000,
     );
     rows.sort((a, b) => Number(b.generation) - Number(a.generation));
     return rows[0] ?? null;
