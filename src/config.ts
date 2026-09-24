@@ -16,11 +16,12 @@ function required(name: string): string {
 
 export const env = {
   nodeEnv: process.env.NODE_ENV ?? "production",
-  supabaseUrl: required("SUPABASE_URL"),
-  supabaseServiceRoleKey: required("SUPABASE_SERVICE_ROLE_KEY"),
+  mendleApiUrl: required("MENDLE_API_URL").replace(/\/$/, ""),
+  workerSecret: required("WORKER_SECRET"),
   projectId: process.env.MENDLE_PROJECT_ID?.trim() || null,
   solanaRpcUrl: required("SOLANA_RPC_URL"),
-  marketPollIntervalMs: num("MARKET_POLL_INTERVAL_MS", 2000),\n  marketSnapshotIntervalSeconds: num("MARKET_SNAPSHOT_INTERVAL_SECONDS", 10),
+  marketPollIntervalMs: num("MARKET_POLL_INTERVAL_MS", 2000),
+  marketSnapshotIntervalSeconds: num("MARKET_SNAPSHOT_INTERVAL_SECONDS", 10),
   generationIntervalSeconds: num("GENERATION_INTERVAL_SECONDS", 300),
   initialObservationSeconds: num("INITIAL_OBSERVATION_SECONDS", 300),
   populationTarget: num("POPULATION_TARGET", 128),
@@ -41,6 +42,7 @@ export const env = {
 
 export function assertConfig(): void {
   if (env.marketPollIntervalMs < 1000) throw new Error("MARKET_POLL_INTERVAL_MS must be >= 1000");
+  if (env.marketSnapshotIntervalSeconds < 5) throw new Error("MARKET_SNAPSHOT_INTERVAL_SECONDS must be >= 5");
   if (env.generationIntervalSeconds < 60) throw new Error("GENERATION_INTERVAL_SECONDS must be >= 60");
   if (env.populationTarget < 16) throw new Error("POPULATION_TARGET must be >= 16");
   if (env.minSurvivors >= env.maxSurvivors) throw new Error("MIN_SURVIVORS must be < MAX_SURVIVORS");
