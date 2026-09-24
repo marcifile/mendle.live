@@ -150,7 +150,7 @@ export class Store {
         { column: "project_id", op: "eq", value: project_id },
         { column: "timestamp", op: "gte", value: since },
       ],
-      10000,
+      5000,
     );
     return rows.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   }
@@ -160,7 +160,7 @@ export class Store {
     const rows = await this.select<any>(
       "market_scores",
       [{ column: "project_id", op: "eq", value: project_id }],
-      10000,
+      5000,
     );
     return rows.sort((a, b) => Number(b.generation) - Number(a.generation)).slice(0, limit);
   }
@@ -194,18 +194,18 @@ export class Store {
     return this.select<Organism>("organisms", [
       { column: "project_id", op: "eq", value: project_id },
       { column: "lineage_id", op: "eq", value: lineageId },
-    ], 10000);
+    ], 5000);
   }
 
   async nextOrganismNumber(): Promise<number> {
     const project_id = await this.projectIdValue();
-    const rows = await this.select<any>("organisms", [{ column: "project_id", op: "eq", value: project_id }], 10000);
+    const rows = await this.select<any>("organisms", [{ column: "project_id", op: "eq", value: project_id }], 5000);
     return rows.reduce((max, r) => Math.max(max, Number(r.organism_number ?? 0)), 0) + 1;
   }
 
   async nextLineageNumber(): Promise<number> {
     const project_id = await this.projectIdValue();
-    const rows = await this.select<any>("lineages", [{ column: "project_id", op: "eq", value: project_id }], 10000);
+    const rows = await this.select<any>("lineages", [{ column: "project_id", op: "eq", value: project_id }], 5000);
     return rows.reduce((max, r) => Math.max(max, Number(r.lineage_number ?? 0)), 0) + 1;
   }
 
@@ -255,7 +255,7 @@ export class Store {
     const rows = await this.select<any>(
       "generations",
       [{ column: "project_id", op: "eq", value: project_id }],
-      10000,
+      5000,
     );
     rows.sort((a, b) => Number(b.generation) - Number(a.generation));
     return rows[0] ?? null;
@@ -290,7 +290,7 @@ export class Store {
     return this.select<any>("lineages", [
       { column: "project_id", op: "eq", value: project_id },
       { column: "active", op: "eq", value: true },
-    ], 10000);
+    ], 5000);
   }
 
   async lineage(id: string): Promise<any | null> {
