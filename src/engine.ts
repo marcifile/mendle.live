@@ -417,23 +417,23 @@ export class MendleEngine {
       };
     });
 
-    await Promise.all(scored.map(({ organism, fitness: value }) =>
-      this.store.updateOrganism(organism.id, { fitness: value })
-    ));
-
-    // V1 keeps current fitness on the organism row. Historical per-generation
-    // fitness is optional and disabled until Lovable's history-table schema is finalized.
-
+    // Score and select fully in memory, then persist all existing-organism
+    // changes in one bulk upsert instead of 100-200 individual HTTP calls.
     const survivors = selectSurvivors(scored);
     const survivorIds = new Set(survivors.map((s) => s.organism.id));
     const deaths = scored.filter((s) => !survivorIds.has(s.organism.id));
 
-    await Promise.all(deaths.map(({ organism }) =>
-      this.store.updateOrganism(organism.id, {
-        alive: false,
-        generation_died: generation,
-      })
-    ));
+    for (const { organism, fitness: value } of scored) {
+      organism.fitness = value;
+      if (!survivorIds.has(organism.id)) {
+        organism.alive = false;
+        organism.generation_died = generation;
+      }
+    }
+    await this.store.upsertOrganisms(scored.map((s) => s.organism));
+
+    // V1 keeps current fitness on the organism row. Historical per-generation
+    // fitness is optional and disabled until Lovable's history-table schema is finalized.
 
     const target = projectBefore.population_target || env.populationTarget;
     const childCount = Math.max(0, target - survivors.length);
