@@ -310,6 +310,13 @@ export class Store {
     ], Math.max(numbers.length, 1));
   }
 
+  async upsertOrganisms(rows: Array<Organism & { project_id?: string }>): Promise<void> {
+    if (!rows.length) return;
+    const project_id = await this.projectIdValue();
+    await this.upsert("organisms", rows.map((r) => ({ project_id, ...r })), "id");
+  }
+
+
   async updateOrganism(id: string, patch: Record<string, unknown>): Promise<void> {
     await this.update("organisms", patch, [{ column: "id", op: "eq", value: id }]);
   }
