@@ -44,7 +44,8 @@ export class MendleEngine {
         await this.tick();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        log.error({ err: error }, "engine tick failed");
+        log.error({ err: error, message }, `engine tick failed: ${message}`);
+        console.error(`engine tick failed: ${message}`);
         try {
           await this.store.updateProject({
             mode: "error",
@@ -411,7 +412,8 @@ export class MendleEngine {
       })));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      log.warn({ err: error }, "fitness history write failed");
+      log.warn({ err: error, message }, `fitness history write failed: ${message}`);
+      console.warn(`fitness history write failed: ${message}`);
       await this.store.log("fitness_history_write_failed", message, "error");
     }
 
@@ -540,7 +542,8 @@ export class MendleEngine {
         await this.store.insertMutationHistory(mutationHistory);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        log.warn({ err: error }, "mutation history write failed");
+        log.warn({ err: error, message }, `mutation history write failed: ${message}`);
+        console.warn(`mutation history write failed: ${message}`);
         await this.store.log("mutation_history_write_failed", message, "error");
       }
     }
