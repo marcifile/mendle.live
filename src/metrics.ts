@@ -31,9 +31,14 @@ export function calculateMarketScores(
 
   const currentVol = realizedVolatility(current.map((s) => safeNumber(s.price)));
   const baselineVol = realizedVolatility(baseline.map((s) => safeNumber(s.price)));
+  // During the very first observation window there is no earlier regime to compare
+  // against. Treat the current window as its own provisional baseline instead of
+  // forcing volatility to ~1.0.
   const volatility = currentVol === 0
     ? 0
-    : clamp(currentVol / (currentVol + Math.max(baselineVol, 0.000001)));
+    : baselineVol > 0
+      ? clamp(currentVol / (currentVol + baselineVol))
+      : 0.5;
 
   const baselineVolume = mean(baseline.map((s) => safeNumber(s.volume_window)).filter((v) => v > 0));
   const baselineTrades = mean(baseline.map((s) => safeNumber(s.trade_count)).filter((v) => v > 0));
@@ -44,8 +49,20 @@ export function calculateMarketScores(
   const depthDenom = latest.liquidityUsd + latest.volumeM5 * env.depthVolumeMultiplier;
   const depth = depthDenom > 0 ? clamp(latest.liquidityUsd / depthDenom) : 0;
 
+  // Prefer directional USD volume from the newest persisted snapshot. The
+  // current DexScreener adapter estimates those side volumes from buy/sell
+  // counts, but keeping the score volume-based here lets a richer market
+  // adapter provide true side volume later without changing the genetics model.
+  const newestSnapshot = current[current.length - 1];
+  const buyVolume = safeNumber(newestSnapshot?.buy_volume);
+  const sellVolume = safeNumber(newestSnapshot?.sell_volume);
+  const directionalVolume = buyVolume + sellVolume;
   const txnTotal = latest.buysM5 + latest.sellsM5;
-  const direction = txnTotal > 0 ? clamp((latest.buysM5 - latest.sellsM5) / txnTotal, -1, 1) : 0;
+  const direction = directionalVolume > 0
+    ? clamp((buyVolume - sellVolume) / directionalVolume, -1, 1)
+    : txnTotal > 0
+      ? clamp((latest.buysM5 - latest.sellsM5) / txnTotal, -1, 1)
+      : 0;
 
   let disturbance = 0;
   if (priorScores.length) {
