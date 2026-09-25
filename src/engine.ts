@@ -165,6 +165,7 @@ export class MendleEngine {
         evolution_status: "waiting",
       });
       await this.store.log("mint_validated", `mint validated; supply ${token.supply}`);
+      log.info({ mint: ca, supply: token.supply }, "mint validated");
     }
 
     const current = await this.store.project();
@@ -174,6 +175,7 @@ export class MendleEngine {
       this.pair = found;
       await this.store.updateProject({ mode: "connecting_feed", market_feed_status: "connecting" });
       await this.store.log("market_located", `${found.dexId} pair ${found.pairAddress} selected by liquidity`);
+      log.info({ dex: found.dexId, pair: found.pairAddress }, "market located");
     }
 
     const connecting = await this.store.project();
@@ -193,6 +195,7 @@ export class MendleEngine {
         market_feed_status: "live",
       });
       await this.store.log("market_connected", "market feed connected");
+      log.info("market feed connected");
     }
 
     const seeding = await this.store.project();
@@ -268,19 +271,35 @@ export class MendleEngine {
   }
 
   private async seedGenerationZero(project: ProjectConfig): Promise<void> {
-    await this.store.log("seeding_population", `seeding ${project.population_target || env.populationTarget} organisms`);
     const target = project.population_target || env.populationTarget;
-    let nextNumber = await this.store.nextOrganismNumber();
+    await this.store.log("seeding_population", `seeding ${target} organisms`);
+    log.info({ target }, "seeding generation 000");
 
+    // Generation 000 is one ancestral population, not 128 unrelated lineages.
+    // This also makes initialization fast: one lineage + one bulk organism insert.
+    const lineageNumber = await this.store.nextLineageNumber();
+    const lineageId = await this.store.createLineage({
+      lineage_number: lineageNumber,
+      founder_organism_id: null,
+      generation_started: 0,
+      generation_extinct: null,
+      living_descendants: target,
+      total_descendants: target,
+      peak_population_share: 1,
+      active: true,
+    });
+
+    let nextNumber = await this.store.nextOrganismNumber();
+    const rows: Record<string, unknown>[] = [];
     for (let i = 0; i < target; i++) {
       const genes = randomGenes();
-      const [organism] = await this.store.insertOrganisms([{
+      rows.push({
         organism_number: nextNumber++,
         generation_born: 0,
         generation_died: null,
         parent_a: null,
         parent_b: null,
-        lineage_id: null,
+        lineage_id: lineageId,
         gene_a: genes.a,
         gene_b: genes.b,
         gene_c: genes.c,
@@ -290,22 +309,18 @@ export class MendleEngine {
         fitness: null,
         alive: true,
         mutation_count: 0,
-      }]);
-      if (!organism) throw new Error("Failed to seed organism");
-
-      const lineageNumber = await this.store.nextLineageNumber();
-      const lineageId = await this.store.createLineage({
-        lineage_number: lineageNumber,
-        founder_organism_id: organism.id,
-        generation_started: 0,
-        generation_extinct: null,
-        living_descendants: 1,
-        total_descendants: 1,
-        peak_population_share: 1 / target,
-        active: true,
       });
-      await this.store.updateOrganism(organism.id, { lineage_id: lineageId });
     }
+
+    const organisms = await this.store.insertOrganisms(rows);
+    if (organisms.length !== target) {
+      throw new Error(`Generation 000 seed incomplete: expected ${target}, inserted ${organisms.length}`);
+    }
+
+    const founder = organisms.reduce((best, organism) =>
+      Number(organism.organism_number) < Number(best.organism_number) ? organism : best
+    );
+    await this.store.updateLineage(lineageId, { founder_organism_id: founder.id });
 
     await this.store.insertGeneration({
       generation: 0,
@@ -316,12 +331,15 @@ export class MendleEngine {
       births: target,
       mutations: 0,
       population_after: target,
-      diversity: null,
-      dominant_lineage_id: null,
+      diversity: diversity(organisms),
+      dominant_lineage_id: lineageId,
       dominant_phenotype: "ancestral population",
       started_at: iso(),
       completed_at: iso(),
     });
+
+    log.info({ target, lineageId }, "generation 000 seeded");
+    await this.store.log("population_seeded", `generation 000 seeded · ${target} organisms · ancestral lineage L-${String(lineageNumber).padStart(3, "0")}`);
   }
 
   private async ensureEpochOne(): Promise<void> {
