@@ -82,6 +82,14 @@ export class Store {
     return data ? [data as T] : [];
   }
 
+  private async upsert<T = any>(table: string, rows: unknown, onConflict: string): Promise<T[]> {
+    const data = await this.call<any>({ action: "upsert", table, rows, onConflict });
+    if (Array.isArray(data)) return data as T[];
+    if (Array.isArray(data?.data)) return data.data as T[];
+    if (Array.isArray(data?.rows)) return data.rows as T[];
+    return data ? [data as T] : [];
+  }
+
   private async update(table: string, values: Record<string, unknown>, filters: Filter[]): Promise<void> {
     if (!filters.length) throw new Error(`Refusing unfiltered update on ${table}`);
     await this.call({ action: "update", table, values, filters });
@@ -168,18 +176,18 @@ export class Store {
 
   async insertScores(generation: number, scores: MarketScores, start: Date, end: Date): Promise<void> {
     const project_id = await this.projectIdValue();
-    await this.insert("market_scores", [{
+    await this.upsert("market_scores", [{
       project_id,
       generation,
       ...scores,
       window_started_at: start.toISOString(),
       window_ended_at: end.toISOString(),
-    }]);
+    }], "project_id,generation");
   }
 
   async insertHabitat(generation: number, h: Habitat): Promise<string | null> {
     const project_id = await this.projectIdValue();
-    const inserted = await this.insert<any>("habitats", [{ project_id, generation, ...h }]);
+    const inserted = await this.upsert<any>("habitats", [{ project_id, generation, ...h }], "project_id,generation");
     if (inserted[0]?.id) return String(inserted[0].id);
 
     const found = await this.select<any>(
@@ -312,7 +320,7 @@ export class Store {
 
   async insertGeneration(row: Record<string, unknown>): Promise<void> {
     const project_id = await this.projectIdValue();
-    await this.insert("generations", [{ project_id, ...row }]);
+    await this.upsert("generations", [{ project_id, ...row }], "project_id,generation");
   }
 
   async latestGeneration(): Promise<any | null> {
