@@ -65,8 +65,9 @@ export class Store {
     table: string,
     filters: Filter[] = [],
     limit?: number,
+    order?: { column: string; ascending?: boolean },
   ): Promise<T[]> {
-    const data = await this.call<any>({ action: "select", table, filters, limit });
+    const data = await this.call<any>({ action: "select", table, filters, limit, order });
     if (Array.isArray(data)) return data as T[];
     if (Array.isArray(data?.data)) return data.data as T[];
     if (Array.isArray(data?.rows)) return data.rows as T[];
@@ -157,12 +158,12 @@ export class Store {
 
   async recentScores(limit = 12): Promise<any[]> {
     const project_id = await this.projectIdValue();
-    const rows = await this.select<any>(
+    return this.select<any>(
       "market_scores",
       [{ column: "project_id", op: "eq", value: project_id }],
-      5000,
+      Math.max(1, Math.min(limit, 5000)),
+      { column: "generation", ascending: false },
     );
-    return rows.sort((a, b) => Number(b.generation) - Number(a.generation)).slice(0, limit);
   }
 
   async insertScores(generation: number, scores: MarketScores, start: Date, end: Date): Promise<void> {
@@ -176,9 +177,43 @@ export class Store {
     }]);
   }
 
-  async insertHabitat(generation: number, h: Habitat): Promise<void> {
+  async insertHabitat(generation: number, h: Habitat): Promise<string | null> {
     const project_id = await this.projectIdValue();
-    await this.insert("habitats", [{ project_id, generation, ...h }]);
+    const inserted = await this.insert<any>("habitats", [{ project_id, generation, ...h }]);
+    if (inserted[0]?.id) return String(inserted[0].id);
+
+    const found = await this.select<any>(
+      "habitats",
+      [
+        { column: "project_id", op: "eq", value: project_id },
+        { column: "generation", op: "eq", value: generation },
+      ],
+      1,
+    );
+    return found[0]?.id ? String(found[0].id) : null;
+  }
+
+  async insertMutationHistory(rows: Array<{
+    organism_id: string;
+    generation: number;
+    gene: string;
+    value_before: number;
+    value_after: number;
+  }>): Promise<void> {
+    if (!rows.length) return;
+    const project_id = await this.projectIdValue();
+    await this.insert("organism_mutations", rows.map((row) => ({ project_id, ...row })));
+  }
+
+  async insertFitnessHistory(rows: Array<{
+    organism_id: string;
+    generation: number;
+    fitness: number;
+    habitat_id: string | null;
+  }>): Promise<void> {
+    if (!rows.length) return;
+    const project_id = await this.projectIdValue();
+    await this.insert("organism_fitness_history", rows.map((row) => ({ project_id, ...row })));
   }
 
   async aliveOrganisms(): Promise<Organism[]> {
@@ -189,24 +224,52 @@ export class Store {
     ], 1000);
   }
 
-  async allOrganismsForLineage(lineageId: string): Promise<Organism[]> {
+  async countOrganismsForLineage(lineageId: string): Promise<number> {
     const project_id = await this.projectIdValue();
-    return this.select<Organism>("organisms", [
-      { column: "project_id", op: "eq", value: project_id },
-      { column: "lineage_id", op: "eq", value: lineageId },
-    ], 5000);
+    const pageSize = 1000;
+    let cursor = 0;
+    let count = 0;
+
+    while (true) {
+      const page = await this.select<Organism>(
+        "organisms",
+        [
+          { column: "project_id", op: "eq", value: project_id },
+          { column: "lineage_id", op: "eq", value: lineageId },
+          { column: "organism_number", op: "gt", value: cursor },
+        ],
+        pageSize,
+        { column: "organism_number", ascending: true },
+      );
+      count += page.length;
+      if (page.length < pageSize) return count;
+
+      const nextCursor = Number(page[page.length - 1]?.organism_number ?? cursor);
+      if (!Number.isFinite(nextCursor) || nextCursor <= cursor) return count;
+      cursor = nextCursor;
+    }
   }
 
   async nextOrganismNumber(): Promise<number> {
     const project_id = await this.projectIdValue();
-    const rows = await this.select<any>("organisms", [{ column: "project_id", op: "eq", value: project_id }], 5000);
-    return rows.reduce((max, r) => Math.max(max, Number(r.organism_number ?? 0)), 0) + 1;
+    const rows = await this.select<any>(
+      "organisms",
+      [{ column: "project_id", op: "eq", value: project_id }],
+      1,
+      { column: "organism_number", ascending: false },
+    );
+    return Number(rows[0]?.organism_number ?? 0) + 1;
   }
 
   async nextLineageNumber(): Promise<number> {
     const project_id = await this.projectIdValue();
-    const rows = await this.select<any>("lineages", [{ column: "project_id", op: "eq", value: project_id }], 5000);
-    return rows.reduce((max, r) => Math.max(max, Number(r.lineage_number ?? 0)), 0) + 1;
+    const rows = await this.select<any>(
+      "lineages",
+      [{ column: "project_id", op: "eq", value: project_id }],
+      1,
+      { column: "lineage_number", ascending: false },
+    );
+    return Number(rows[0]?.lineage_number ?? 0) + 1;
   }
 
   async createLineage(payload: Record<string, unknown>): Promise<string> {
@@ -255,9 +318,9 @@ export class Store {
     const rows = await this.select<any>(
       "generations",
       [{ column: "project_id", op: "eq", value: project_id }],
-      5000,
+      1,
+      { column: "generation", ascending: false },
     );
-    rows.sort((a, b) => Number(b.generation) - Number(a.generation));
     return rows[0] ?? null;
   }
 
@@ -268,11 +331,15 @@ export class Store {
 
   async activeEpoch(): Promise<any | null> {
     const project_id = await this.projectIdValue();
-    const rows = await this.select<any>("epochs", [
-      { column: "project_id", op: "eq", value: project_id },
-      { column: "completed_at", op: "is", value: null },
-    ], 100);
-    rows.sort((a, b) => Number(b.epoch) - Number(a.epoch));
+    const rows = await this.select<any>(
+      "epochs",
+      [
+        { column: "project_id", op: "eq", value: project_id },
+        { column: "completed_at", op: "is", value: null },
+      ],
+      1,
+      { column: "epoch", ascending: false },
+    );
     return rows[0] ?? null;
   }
 
@@ -287,10 +354,28 @@ export class Store {
 
   async activeLineages(): Promise<any[]> {
     const project_id = await this.projectIdValue();
-    return this.select<any>("lineages", [
-      { column: "project_id", op: "eq", value: project_id },
-      { column: "active", op: "eq", value: true },
-    ], 5000);
+    const pageSize = 1000;
+    const rows: any[] = [];
+    let cursor = 0;
+
+    while (true) {
+      const page = await this.select<any>(
+        "lineages",
+        [
+          { column: "project_id", op: "eq", value: project_id },
+          { column: "active", op: "eq", value: true },
+          { column: "lineage_number", op: "gt", value: cursor },
+        ],
+        pageSize,
+        { column: "lineage_number", ascending: true },
+      );
+      rows.push(...page);
+      if (page.length < pageSize) return rows;
+
+      const nextCursor = Number(page[page.length - 1]?.lineage_number ?? cursor);
+      if (!Number.isFinite(nextCursor) || nextCursor <= cursor) return rows;
+      cursor = nextCursor;
+    }
   }
 
   async lineage(id: string): Promise<any | null> {
