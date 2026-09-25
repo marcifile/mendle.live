@@ -201,8 +201,9 @@ export class Store {
     value_after: number;
   }>): Promise<void> {
     if (!rows.length) return;
-    const project_id = await this.projectIdValue();
-    await this.insert("organism_mutations", rows.map((row) => ({ project_id, ...row })));
+    // These rows are already scoped through organism_id. The Lovable-created
+    // organism_mutations table does not accept project_id on insert.
+    await this.insert("organism_mutations", rows);
   }
 
   async insertFitnessHistory(rows: Array<{
@@ -212,8 +213,9 @@ export class Store {
     habitat_id: string | null;
   }>): Promise<void> {
     if (!rows.length) return;
-    const project_id = await this.projectIdValue();
-    await this.insert("organism_fitness_history", rows.map((row) => ({ project_id, ...row })));
+    // Like organism_mutations, this table is scoped through organism_id and
+    // habitat_id and rejects an extra project_id field.
+    await this.insert("organism_fitness_history", rows);
   }
 
   async aliveOrganisms(): Promise<Organism[]> {
