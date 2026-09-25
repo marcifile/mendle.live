@@ -119,11 +119,28 @@ export class MendleEngine {
 
     if (!["observation_window", "live"].includes(refreshed.mode)) return;
 
-    const anchor = refreshed.last_generation_at ?? refreshed.initialized_at;
-    if (!anchor) return;
-
     const intervalMs = (refreshed.generation_interval_seconds || env.generationIntervalSeconds) * 1000;
-    const due = Date.now() - new Date(anchor).getTime() >= intervalMs;
+    const fallbackAnchor = refreshed.last_generation_at ?? refreshed.initialized_at;
+    if (!fallbackAnchor) return;
+
+    // Backfill the shared window timestamps for experiments that were already
+    // running before these fields existed. The frontend derives both its
+    // progress bar and countdown from this same pair.
+    if (!refreshed.window_started_at || !refreshed.window_ends_at) {
+      const started = new Date(fallbackAnchor);
+      const durationMs = refreshed.current_generation === 0
+        ? env.initialObservationSeconds * 1000
+        : intervalMs;
+      const ends = new Date(started.getTime() + durationMs);
+      refreshed.window_started_at = started.toISOString();
+      refreshed.window_ends_at = ends.toISOString();
+      await this.store.updateProject({
+        window_started_at: refreshed.window_started_at,
+        window_ends_at: refreshed.window_ends_at,
+      });
+    }
+
+    const due = Date.now() >= new Date(refreshed.window_ends_at).getTime();
     if (due) await this.runGeneration(refreshed);
   }
 
@@ -183,7 +200,9 @@ export class MendleEngine {
       if (alive.length === 0) {
         await this.seedGenerationZero(seeding);
       }
-      const now = iso();
+      const nowDate = new Date();
+      const now = nowDate.toISOString();
+      const windowEnd = new Date(nowDate.getTime() + env.initialObservationSeconds * 1000).toISOString();
       await this.ensureEpochOne();
       await this.store.updateProject({
         mode: "observation_window",
@@ -193,6 +212,8 @@ export class MendleEngine {
         current_epoch: 1,
         initialized_at: seeding.initialized_at ?? now,
         last_generation_at: seeding.last_generation_at ?? now,
+        window_started_at: now,
+        window_ends_at: windowEnd,
         is_paused: false,
       });
       await this.store.log(
@@ -332,7 +353,12 @@ export class MendleEngine {
   private async runGeneration(projectBefore: ProjectConfig): Promise<void> {
     if (!this.pair) throw new Error("Cannot run generation without a market pair");
 
-    const start = new Date(projectBefore.last_generation_at ?? projectBefore.initialized_at ?? Date.now() - env.generationIntervalSeconds * 1000);
+    const start = new Date(
+      projectBefore.window_started_at ??
+      projectBefore.last_generation_at ??
+      projectBefore.initialized_at ??
+      Date.now() - env.generationIntervalSeconds * 1000
+    );
     const end = new Date();
     const generation = projectBefore.current_generation + 1;
 
@@ -350,20 +376,44 @@ export class MendleEngine {
     const habitat = scoresToHabitat(scores);
 
     await this.store.insertScores(generation, scores, start, end);
-    await this.store.insertHabitat(generation, habitat);
+    const habitatId = await this.store.insertHabitat(generation, habitat);
+
+    await this.store.log(
+      "generation_market",
+      `gen ${String(generation).padStart(3, "0")} · scores V=${scores.volatility.toFixed(3)} A=${scores.activity.toFixed(3)} D=${scores.depth.toFixed(3)} R=${scores.direction.toFixed(3)} X=${scores.disturbance.toFixed(3)} · habitat T=${habitat.temperature.toFixed(3)} N=${habitat.nutrients.toFixed(3)} C=${habitat.capacity.toFixed(3)} F=${habitat.current.toFixed(3)} S=${habitat.disturbance.toFixed(3)}`,
+    );
 
     const population = await this.store.aliveOrganisms();
     if (!population.length) throw new Error("No living population");
 
     const legacy = await this.activeLegacy(projectBefore);
-    const scored = population.map((organism) => ({
-      organism,
-      fitness: fitness(organismGenes(organism), habitat, legacy).total,
-    }));
+    const scored = population.map((organism) => {
+      const breakdown = fitness(organismGenes(organism), habitat, legacy);
+      // Keep the in-memory organism synchronized with the value persisted to
+      // the database. Epoch-close logic uses these same objects later.
+      organism.fitness = breakdown.total;
+      return {
+        organism,
+        fitness: breakdown.total,
+      };
+    });
 
     await Promise.all(scored.map(({ organism, fitness: value }) =>
       this.store.updateOrganism(organism.id, { fitness: value })
     ));
+
+    try {
+      await this.store.insertFitnessHistory(scored.map(({ organism, fitness: value }) => ({
+        organism_id: organism.id,
+        generation,
+        fitness: value,
+        habitat_id: habitatId,
+      })));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.warn({ err: error }, "fitness history write failed");
+      await this.store.log("fitness_history_write_failed", message, "error");
+    }
 
     const survivors = selectSurvivors(scored);
     const survivorIds = new Set(survivors.map((s) => s.organism.id));
@@ -419,6 +469,13 @@ export class MendleEngine {
 
     const children = rows.length ? await this.store.insertOrganisms(rows) : [];
     const childByNumber = new Map(children.map((c) => [Number(c.organism_number), c]));
+    const mutationHistory: Array<{
+      organism_id: string;
+      generation: number;
+      gene: string;
+      value_before: number;
+      value_after: number;
+    }> = [];
     let mutationCount = 0;
 
     for (const meta of metas) {
@@ -426,6 +483,15 @@ export class MendleEngine {
       if (!child) continue;
       if (!meta.mutations.length) continue;
       mutationCount += meta.mutations.length;
+      for (const mutation of meta.mutations) {
+        mutationHistory.push({
+          organism_id: child.id,
+          generation,
+          gene: mutation.locus.toUpperCase(),
+          value_before: mutation.from,
+          value_after: mutation.to,
+        });
+      }
 
       const major = meta.mutations.some((m) => Math.abs(m.delta) >= 5);
       let lineageId = child.lineage_id;
@@ -467,6 +533,16 @@ export class MendleEngine {
           .join(", "),
         metadata: { mutations: meta.mutations },
       });
+    }
+
+    if (mutationHistory.length) {
+      try {
+        await this.store.insertMutationHistory(mutationHistory);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log.warn({ err: error }, "mutation history write failed");
+        await this.store.log("mutation_history_write_failed", message, "error");
+      }
     }
 
     const postPopulation = [...survivors.map((s) => s.organism), ...children];
@@ -521,14 +597,30 @@ export class MendleEngine {
       });
     }
 
+    const nextWindowEnd = new Date(
+      end.getTime() + (projectBefore.generation_interval_seconds || env.generationIntervalSeconds) * 1000
+    );
+
     await this.store.updateProject({
       current_generation: generation,
       last_generation_at: end.toISOString(),
+      window_started_at: end.toISOString(),
+      window_ends_at: nextWindowEnd.toISOString(),
       evolution_status: "running",
       mode: "live",
     });
 
     await this.maybeCloseEpoch(generation, dominantLineageId, postPopulation);
+
+    const fitnessValues = scored.map((s) => s.fitness);
+    const minFitness = Math.min(...fitnessValues);
+    const maxFitness = Math.max(...fitnessValues);
+    const meanFitness = fitnessValues.reduce((sum, value) => sum + value, 0) / Math.max(1, fitnessValues.length);
+
+    await this.store.log(
+      "generation_selection",
+      `gen ${String(generation).padStart(3, "0")} · fitness min=${minFitness.toFixed(3)} mean=${meanFitness.toFixed(3)} max=${maxFitness.toFixed(3)} · survivors=${survivors.length} deaths=${deaths.length}`,
+    );
 
     await this.store.log(
       "generation_completed",
@@ -550,11 +642,11 @@ export class MendleEngine {
 
     for (const lineage of active) {
       const living = counts.get(lineage.id) ?? 0;
-      const all = await this.store.allOrganismsForLineage(lineage.id);
+      const totalDescendants = await this.store.countOrganismsForLineage(lineage.id);
       const share = living / Math.max(1, target);
       const patch: Record<string, unknown> = {
         living_descendants: living,
-        total_descendants: all.length,
+        total_descendants: totalDescendants,
         peak_population_share: Math.max(Number(lineage.peak_population_share ?? 0), share),
       };
 
