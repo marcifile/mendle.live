@@ -403,19 +403,8 @@ export class MendleEngine {
       this.store.updateOrganism(organism.id, { fitness: value })
     ));
 
-    try {
-      await this.store.insertFitnessHistory(scored.map(({ organism, fitness: value }) => ({
-        organism_id: organism.id,
-        generation,
-        fitness: value,
-        habitat_id: habitatId,
-      })));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      log.warn({ err: error, message }, `fitness history write failed: ${message}`);
-      console.warn(`fitness history write failed: ${message}`);
-      await this.store.log("fitness_history_write_failed", message, "error");
-    }
+    // V1 keeps current fitness on the organism row. Historical per-generation
+    // fitness is optional and disabled until Lovable's history-table schema is finalized.
 
     const survivors = selectSurvivors(scored);
     const survivorIds = new Set(survivors.map((s) => s.organism.id));
@@ -471,13 +460,6 @@ export class MendleEngine {
 
     const children = rows.length ? await this.store.insertOrganisms(rows) : [];
     const childByNumber = new Map(children.map((c) => [Number(c.organism_number), c]));
-    const mutationHistory: Array<{
-      organism_id: string;
-      generation: number;
-      gene: string;
-      value_before: number;
-      value_after: number;
-    }> = [];
     let mutationCount = 0;
 
     for (const meta of metas) {
@@ -485,16 +467,6 @@ export class MendleEngine {
       if (!child) continue;
       if (!meta.mutations.length) continue;
       mutationCount += meta.mutations.length;
-      for (const mutation of meta.mutations) {
-        mutationHistory.push({
-          organism_id: child.id,
-          generation,
-          gene: mutation.locus.toUpperCase(),
-          value_before: mutation.from,
-          value_after: mutation.to,
-        });
-      }
-
       const major = meta.mutations.some((m) => Math.abs(m.delta) >= 5);
       let lineageId = child.lineage_id;
 
@@ -537,16 +509,8 @@ export class MendleEngine {
       });
     }
 
-    if (mutationHistory.length) {
-      try {
-        await this.store.insertMutationHistory(mutationHistory);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        log.warn({ err: error, message }, `mutation history write failed: ${message}`);
-        console.warn(`mutation history write failed: ${message}`);
-        await this.store.log("mutation_history_write_failed", message, "error");
-      }
-    }
+    // Mutation history is represented by the canonical mutation events in V1.
+    // The optional organism_mutations history table is disabled until its schema is finalized.
 
     const postPopulation = [...survivors.map((s) => s.organism), ...children];
     const lineageCounts = new Map<string, number>();
