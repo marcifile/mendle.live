@@ -3,6 +3,28 @@ import { safeNumber } from "./utils.js";
 
 const DEX = "https://api.dexscreener.com";
 
+async function dexFetch(url: string): Promise<Response> {
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const response = await fetch(url, {
+      headers: { accept: "application/json" },
+    });
+    if (response.ok) return response;
+
+    lastStatus = response.status;
+    if (response.status !== 429 && response.status < 500) {
+      throw new Error(`DexScreener HTTP ${response.status}`);
+    }
+
+    const retryAfter = Number(response.headers.get("retry-after"));
+    const delayMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? retryAfter * 1000
+      : Math.min(15000, 1500 * 2 ** attempt);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  throw new Error(`DexScreener HTTP ${lastStatus || 429} after retries`);
+}
+
 export async function validateSolanaMint(rpcUrl: string, mint: string): Promise<{ supply: number; decimals: number }> {
   const response = await fetch(rpcUrl, {
     method: "POST",
@@ -26,10 +48,7 @@ export async function validateSolanaMint(rpcUrl: string, mint: string): Promise<
 }
 
 export async function discoverPair(mint: string): Promise<PairState | null> {
-  const response = await fetch(`${DEX}/token-pairs/v1/solana/${mint}`, {
-    headers: { accept: "application/json" },
-  });
-  if (!response.ok) throw new Error(`DexScreener HTTP ${response.status}`);
+  const response = await dexFetch(`${DEX}/token-pairs/v1/solana/${mint}`);
   const pairs = await response.json() as any[];
   if (!Array.isArray(pairs) || !pairs.length) return null;
 
@@ -43,10 +62,7 @@ export async function discoverPair(mint: string): Promise<PairState | null> {
 }
 
 export async function fetchPair(pairAddress: string, mint: string): Promise<PairState> {
-  const response = await fetch(`${DEX}/latest/dex/pairs/solana/${pairAddress}`, {
-    headers: { accept: "application/json" },
-  });
-  if (!response.ok) throw new Error(`DexScreener HTTP ${response.status}`);
+  const response = await dexFetch(`${DEX}/latest/dex/pairs/solana/${pairAddress}`);
   const json = await response.json() as any;
   const pair = json?.pairs?.[0];
   if (!pair) throw new Error("Pair disappeared from DexScreener");
