@@ -22,6 +22,8 @@ export interface ProjectConfig {
   initialized_at: string | null;
   last_market_update: string | null;
   last_generation_at: string | null;
+  window_started_at?: string | null;
+  window_ends_at?: string | null;
   is_paused: boolean;
   manual_generation_requested?: boolean;
 }
